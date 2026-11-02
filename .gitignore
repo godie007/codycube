@@ -1,0 +1,9 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+tests/.tmp/
+codycube-obsidian/.obsidian/workspace.json
+codycube-obsidian/.obsidian/workspace-mobile.json
+codycube-obsidian/.trash/

@@ -1,0 +1,45 @@
+{
+  "name": "codycube",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Codycube: cliente de escritorio para Kubernetes",
+  "main": "out/main/index.js",
+  "scripts": {
+    "postinstall": "node scripts/ensure-electron.cjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "package:mac": "bash scripts/package-mac.sh",
+    "install:mac": "bash scripts/package-mac.sh --install"
+  },
+  "dependencies": {
+    "@codemirror/lang-yaml": "^6.1.2",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/theme-one-dark": "^6.1.3",
+    "@kubernetes/client-node": "^2.0.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "codemirror": "^6.0.2",
+    "elkjs": "^0.12.1",
+    "js-yaml": "^4.1.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^44.9.1",
+    "electron-vite": "^6.0.0",
+    "playwright-core": "^1.56.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Namespace
+metadata: { name: demo }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: logger, namespace: demo }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: logger } }
+  template:
+    metadata: { labels: { app: logger } }
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "i=0; while true; do echo \"linea-$i de $(hostname)\"; i=$((i+1)); sleep 1; done"]
+          resources: { requests: { cpu: 10m, memory: 8Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: web, namespace: demo }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: web } }
+  template:
+    metadata: { labels: { app: web } }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports: [{ containerPort: 80, name: http }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: web, namespace: demo }
+spec:
+  selector: { app: web }
+  ports: [{ port: 8080, targetPort: http }]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: ajustes, namespace: demo }
+data: { modo: produccion }
+---
+apiVersion: v1
+kind: Secret
+metadata: { name: clave, namespace: demo }
+stringData: { token: súper-secreto }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: tarea, namespace: demo }
+spec:
+  schedule: "0 0 1 1 *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers: [{ name: job, image: busybox:1.36, command: ["sh", "-c", "echo hecho-por-cron"] }]
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: { name: gadgets.ejemplo.dev }
+spec:
+  group: ejemplo.dev
+  scope: Namespaced
+  names: { plural: gadgets, singular: gadget, kind: Gadget }
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      additionalPrinterColumns: [{ name: Color, type: string, jsonPath: .spec.color }]
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties: { color: { type: string } }

@@ -1,0 +1,229 @@
+# Microservicios de ejemplo con Dapr, para probar la vista de arquitectura en un clúster desechable.
+#
+#   Ingress → gateway → orders → payments (10 % de errores 500)
+#                         ├──→ estado en Redis
+#                         └──→ topic "pedidos" → notifications, inventory
+#   reports no usa Dapr: solo declara la URL de orders en una variable de entorno.
+apiVersion: v1
+kind: Namespace
+metadata: { name: tienda }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: app-code, namespace: tienda }
+data:
+  app.py: |
+    import json, os, random, threading, time, urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    ROLE = os.environ["ROLE"]
+    DAPR = "http://127.0.0.1:" + os.environ.get("DAPR_HTTP_PORT", "3500")
+
+    def call(path, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(DAPR + path, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=5).read()
+            return 200
+        except urllib.error.HTTPError as e:
+            return e.code
+        except Exception as e:
+            print("error", path, e, flush=True)
+            return 599
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *a): pass
+        def reply(self, code, text=b"{}"):
+            self.send_response(code); self.send_header("Content-Length", str(len(text))); self.end_headers(); self.wfile.write(text)
+        # Dapr pregunta a cada app por sus suscripciones y exige una lista: aquí son declarativas
+        def do_GET(self): self.reply(200, b"[]" if self.path == "/dapr/subscribe" else b"{}")
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if ROLE == "orders" and self.path == "/create":
+                oid = random.randint(1, 10**9)
+                paid = call("/v1.0/invoke/payments/method/charge", {"id": oid})
+                call("/v1.0/state/statestore", [{"key": str(oid), "value": {"paid": paid}}])
+                if paid == 200:
+                    call("/v1.0/publish/pubsub/pedidos", {"id": oid})
+                return self.reply(200 if paid == 200 else 502)
+            if ROLE == "payments":
+                time.sleep(random.uniform(0.02, 0.15))
+                return self.reply(500 if random.random() < 0.1 else 200)
+            if ROLE in ("notifications", "inventory"):
+                time.sleep(random.uniform(0.005, 0.03))
+                return self.reply(200, b'{"status":"SUCCESS"}')
+            self.reply(200)
+
+    def traffic():
+        time.sleep(15)
+        while True:
+            call("/v1.0/invoke/orders/method/create", {"sku": "a"})
+            time.sleep(random.uniform(0.2, 0.5))
+
+    if ROLE == "gateway":
+        threading.Thread(target=traffic, daemon=True).start()
+    ThreadingHTTPServer(("0.0.0.0", 8000), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: redis, namespace: tienda }
+spec:
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata: { labels: { app: redis } }
+    spec:
+      containers: [{ name: redis, image: "redis:7-alpine", ports: [{ containerPort: 6379 }] }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: redis, namespace: tienda }
+spec:
+  selector: { app: redis }
+  ports: [{ port: 6379 }]
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata: { name: pubsub, namespace: tienda }
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata: [{ name: redisHost, value: "redis:6379" }, { name: redisPassword, value: "" }]
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata: { name: statestore, namespace: tienda }
+spec:
+  type: state.redis
+  version: v1
+  metadata: [{ name: redisHost, value: "redis:6379" }, { name: redisPassword, value: "" }]
+scopes: [orders]
+---
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata: { name: pedidos-notifications, namespace: tienda }
+spec:
+  pubsubname: pubsub
+  topic: pedidos
+  routes: { default: /eventos }
+scopes: [notifications]
+---
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata: { name: pedidos-inventory, namespace: tienda }
+spec:
+  pubsubname: pubsub
+  topic: pedidos
+  routes: { default: /eventos }
+scopes: [inventory]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gateway, namespace: tienda }
+spec:
+  selector: { app: gateway }
+  ports: [{ port: 80, targetPort: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: tienda, namespace: tienda }
+spec:
+  rules:
+    - host: tienda.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: gateway, port: { number: 80 } } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: orders, namespace: tienda }
+spec:
+  selector: { app: orders }
+  ports: [{ port: 8000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: reports, namespace: tienda }
+spec:
+  selector: { matchLabels: { app: reports } }
+  template:
+    metadata: { labels: { app: reports } }
+    spec:
+      containers:
+        - name: reports
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 100000"]
+          env: [{ name: ORDERS_URL, value: "http://orders.tienda.svc.cluster.local:8000/api" }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gateway, namespace: tienda }
+spec:
+  selector: { matchLabels: { app: gateway } }
+  template:
+    metadata:
+      labels: { app: gateway }
+      annotations: { dapr.io/enabled: "true", dapr.io/app-id: gateway, dapr.io/app-port: "8000" }
+    spec:
+      volumes: [{ name: code, configMap: { name: app-code } }]
+      containers:
+        - { name: app, image: "python:3.12-alpine", command: [python, /code/app.py], env: [{ name: ROLE, value: gateway }], volumeMounts: [{ name: code, mountPath: /code }], ports: [{ containerPort: 8000 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: orders, namespace: tienda }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: orders } }
+  template:
+    metadata:
+      labels: { app: orders }
+      annotations: { dapr.io/enabled: "true", dapr.io/app-id: orders, dapr.io/app-port: "8000" }
+    spec:
+      volumes: [{ name: code, configMap: { name: app-code } }]
+      containers:
+        - { name: app, image: "python:3.12-alpine", command: [python, /code/app.py], env: [{ name: ROLE, value: orders }], volumeMounts: [{ name: code, mountPath: /code }], ports: [{ containerPort: 8000 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: payments, namespace: tienda }
+spec:
+  selector: { matchLabels: { app: payments } }
+  template:
+    metadata:
+      labels: { app: payments }
+      annotations: { dapr.io/enabled: "true", dapr.io/app-id: payments, dapr.io/app-port: "8000" }
+    spec:
+      volumes: [{ name: code, configMap: { name: app-code } }]
+      containers:
+        - { name: app, image: "python:3.12-alpine", command: [python, /code/app.py], env: [{ name: ROLE, value: payments }], volumeMounts: [{ name: code, mountPath: /code }], ports: [{ containerPort: 8000 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: notifications, namespace: tienda }
+spec:
+  selector: { matchLabels: { app: notifications } }
+  template:
+    metadata:
+      labels: { app: notifications }
+      annotations: { dapr.io/enabled: "true", dapr.io/app-id: notifications, dapr.io/app-port: "8000" }
+    spec:
+      volumes: [{ name: code, configMap: { name: app-code } }]
+      containers:
+        - { name: app, image: "python:3.12-alpine", command: [python, /code/app.py], env: [{ name: ROLE, value: notifications }], volumeMounts: [{ name: code, mountPath: /code }], ports: [{ containerPort: 8000 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: inventory, namespace: tienda }
+spec:
+  selector: { matchLabels: { app: inventory } }
+  template:
+    metadata:
+      labels: { app: inventory }
+      annotations: { dapr.io/enabled: "true", dapr.io/app-id: inventory, dapr.io/app-port: "8000" }
+    spec:
+      volumes: [{ name: code, configMap: { name: app-code } }]
+      containers:
+        - { name: app, image: "python:3.12-alpine", command: [python, /code/app.py], env: [{ name: ROLE, value: inventory }], volumeMounts: [{ name: code, mountPath: /code }], ports: [{ containerPort: 8000 }] }
